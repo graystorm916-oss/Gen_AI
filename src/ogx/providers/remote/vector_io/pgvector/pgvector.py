@@ -715,7 +715,7 @@ class PGVectorIndex(EmbeddingIndex):
             cur.execute(
                 sql.SQL(
                     """
-                SELECT COUNT(DISTINCT id)
+                SELECT COUNT(*)
                 FROM {};
                 """
                 ).format(self._table_sql)
@@ -784,9 +784,7 @@ class PGVectorVectorIOAdapter(OpenAIVectorStoreMixin, VectorIO, VectorStoresProt
         self._policy = policy or []
 
     async def initialize(self) -> None:
-        # Create a safe config representation with masked password for logging
-        safe_config = {**self.config.model_dump(exclude={"password"}), "password": "******"}
-        log.info(f"Initializing PGVector memory adapter with config: {safe_config}")
+        log.info("Initializing PGVector memory adapter", config=self.config.model_dump())
         self.kvstore = await kvstore_impl(self.config.persistence)
 
         if self.config.metadata_store:
@@ -802,7 +800,7 @@ class PGVectorVectorIOAdapter(OpenAIVectorStoreMixin, VectorIO, VectorStoresProt
                 port=self.config.port,
                 database=self.config.db,
                 user=self.config.user,
-                password=self.config.password,
+                password=self.config.password.get_secret_value() if self.config.password else None,
             )
             self.conn.autocommit = True
             with self.conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
