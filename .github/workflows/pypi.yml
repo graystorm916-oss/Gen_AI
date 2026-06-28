@@ -225,6 +225,11 @@ jobs:
             path: .
             type: local
             registry: pypi
+          # OpenAPI-generated SDK (built from spec in this repo)
+          - package: ogx-open-client
+            path: client-sdks/openapi
+            type: openapi-sdk
+            registry: pypi
           # External packages (client SDKs from other repos)
           - package: ogx-client-python
             repo: ogx-ai/ogx-client-python
@@ -246,7 +251,7 @@ jobs:
 
           if [ "$PACKAGES" == "all" ]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
-          elif [ "$PACKAGES" == "ogx-only" ] && [ "$TYPE" == "local" ]; then
+          elif [ "$PACKAGES" == "ogx-only" ] && { [ "$TYPE" == "local" ] || [ "$TYPE" == "openapi-sdk" ]; }; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
           elif [ "$PACKAGES" == "clients-only" ] && [ "$TYPE" == "external" ]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -257,13 +262,13 @@ jobs:
 
       # === LOCAL PACKAGE STEPS ===
       - name: Checkout local repo
-        if: steps.should-build.outputs.skip != 'true' && matrix.type == 'local'
+        if: steps.should-build.outputs.skip != 'true' && (matrix.type == 'local' || matrix.type == 'openapi-sdk')
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0  # for setuptools-scm
 
       - name: Install dependent PRs if needed
-        if: steps.should-build.outputs.skip != 'true' && matrix.type == 'local'
+        if: steps.should-build.outputs.skip != 'true' && (matrix.type == 'local' || matrix.type == 'openapi-sdk')
         uses: depends-on/depends-on-action@826c144163ac67bf08347590a5f81afd45da63ca # main
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -349,6 +354,48 @@ jobs:
         working-directory: ${{ matrix.path }}
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.compute-version.outputs.version }}
+
+      # === OPENAPI SDK BUILD (ogx-open-client) ===
+      - name: Set up Java (openapi-sdk)
+        if: steps.should-build.outputs.skip != 'true' && matrix.type == 'openapi-sdk'
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Set up Node.js (openapi-sdk)
+        if: steps.should-build.outputs.skip != 'true' && matrix.type == 'openapi-sdk'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '20'
+
+      - name: Install openapi-generator-cli (openapi-sdk)
+        if: steps.should-build.outputs.skip != 'true' && matrix.type == 'openapi-sdk'
+        run: npm install -g @openapitools/openapi-generator-cli
+
+      - name: Generate and build OpenAPI SDK
+        if: steps.should-build.outputs.skip != 'true' && matrix.type == 'openapi-sdk'
+        working-directory: ${{ matrix.path }}
+        run: |
+          VERSION="${{ needs.compute-version.outputs.version }}"
+          echo "Generating SDK with OPEN=1 (ogx_open_client) at version ${VERSION}..."
+          make sdk OPEN=1 VERSION="${VERSION}"
+
+          cd sdks/python
+          echo "Building Python package..."
+          uv build --out-dir ../../dist --no-build-isolation
+
+      - name: Verify OpenAPI SDK generation
+        if: steps.should-build.outputs.skip != 'true' && matrix.type == 'openapi-sdk'
+        working-directory: ${{ matrix.path }}
+        run: |
+          PY_FILE_COUNT=$(find sdks/python -name "*.py" | wc -l)
+          echo "Generated Python files: $PY_FILE_COUNT"
+          if [ "$PY_FILE_COUNT" -le 10 ]; then
+            echo "::error::Too few Python files generated (expected > 10, got $PY_FILE_COUNT)"
+            exit 1
+          fi
+          echo "SDK generated successfully"
 
       # === EXTERNAL PYTHON PACKAGE BUILD ===
       - name: Check and bump version if exists on PyPI
@@ -525,7 +572,7 @@ jobs:
         run: uv pip install --system twine check-wheel-contents
 
       - name: Check wheel contents (local)
-        if: steps.should-build.outputs.skip != 'true' && matrix.type == 'local' && matrix.registry == 'pypi'
+        if: steps.should-build.outputs.skip != 'true' && (matrix.type == 'local' || matrix.type == 'openapi-sdk') && matrix.registry == 'pypi'
         run: check-wheel-contents --ignore W002,W004 ${{ matrix.path }}/dist/*.whl
 
       - name: Check wheel contents (external)
@@ -533,7 +580,7 @@ jobs:
         run: check-wheel-contents --ignore W002,W004 external-repo/dist/*.whl
 
       - name: Validate package with twine (local)
-        if: steps.should-build.outputs.skip != 'true' && matrix.type == 'local' && matrix.registry == 'pypi'
+        if: steps.should-build.outputs.skip != 'true' && (matrix.type == 'local' || matrix.type == 'openapi-sdk') && matrix.registry == 'pypi'
         run: twine check ${{ matrix.path }}/dist/*
 
       - name: Validate package with twine (external)
@@ -542,7 +589,7 @@ jobs:
 
       # === LIST AND UPLOAD ARTIFACTS ===
       - name: List dist contents (local)
-        if: steps.should-build.outputs.skip != 'true' && matrix.type == 'local'
+        if: steps.should-build.outputs.skip != 'true' && (matrix.type == 'local' || matrix.type == 'openapi-sdk')
         run: ls -la ${{ matrix.path }}/dist/
 
       - name: List dist contents (external Python)
@@ -559,7 +606,7 @@ jobs:
           ls -la dist/
 
       - name: Upload artifacts (local)
-        if: steps.should-build.outputs.skip != 'true' && matrix.type == 'local'
+        if: steps.should-build.outputs.skip != 'true' && (matrix.type == 'local' || matrix.type == 'openapi-sdk')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Packages-${{ matrix.package }}
@@ -627,6 +674,14 @@ jobs:
           path: dist-client-ts
         continue-on-error: true
 
+      - name: Download ogx-open-client artifacts
+        id: download-open-client
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: Packages-ogx-open-client
+          path: dist-open-client
+        continue-on-error: true
+
       - name: Create venv and install Python packages
         run: |
           uv venv .venv
@@ -646,6 +701,11 @@ jobs:
           if [ -d "dist-stack" ] && ls dist-stack/*.whl 1>/dev/null 2>&1; then
             echo "Installing ogx..."
             uv pip install dist-stack/*.whl
+          fi
+
+          if [ -d "dist-open-client" ] && ls dist-open-client/*.whl 1>/dev/null 2>&1; then
+            echo "Installing ogx-open-client..."
+            uv pip install dist-open-client/*.whl
           fi
 
       - name: List Wheel Contents (ogx-api)
@@ -681,6 +741,10 @@ jobs:
             python -c "import ogx_client; print(f'ogx_client imported successfully from {ogx_client.__file__}')"
           fi
 
+          if [ -d "dist-open-client" ] && ls dist-open-client/*.whl 1>/dev/null 2>&1; then
+            python -c "import ogx_open_client; print(f'ogx_open_client imported successfully from {ogx_open_client.__file__}')"
+          fi
+
       - name: Verify TypeScript package
         if: steps.download-client-ts.outcome == 'success'
         run: |
@@ -700,7 +764,7 @@ jobs:
           fi
 
   # Publish packages to PyPI/npm
-  # Order: ogx-client-python, ogx-client-typescript, ogx-api, ogx
+  # Order: ogx-client-python, ogx-client-typescript, ogx-open-client, ogx-api, ogx
   publish-packages:
     name: Publish ${{ matrix.package }}
     if: |
@@ -727,6 +791,9 @@ jobs:
           - package: ogx-client-typescript
             registry: npm
             type: external
+          - package: ogx-open-client
+            registry: pypi
+            type: openapi-sdk
           - package: ogx-api
             registry: pypi
             type: local
@@ -745,7 +812,7 @@ jobs:
 
           if [ "$PACKAGES" == "all" ]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
-          elif [ "$PACKAGES" == "ogx-only" ] && [ "$TYPE" == "local" ]; then
+          elif [ "$PACKAGES" == "ogx-only" ] && { [ "$TYPE" == "local" ] || [ "$TYPE" == "openapi-sdk" ]; }; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
           elif [ "$PACKAGES" == "clients-only" ] && [ "$TYPE" == "external" ]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"

@@ -13,6 +13,10 @@ on:
         options:
           - testpypi
           - pypi
+      version:
+        description: 'Version override (e.g., "1.2.0"). Leave empty to auto-detect from tag or fallback_version.'
+        required: false
+        type: string
       dry_run:
         description: 'Dry run (build only, no publish)'
         type: boolean
@@ -29,7 +33,37 @@ permissions:
   contents: read
 
 jobs:
+  compute-version:
+    name: Compute version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Compute SDK version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            # Explicit override from workflow_dispatch
+            VERSION="${{ inputs.version }}"
+          elif [[ "$GITHUB_REF" == refs/tags/openapi-sdk-v* ]]; then
+            # Extract version from tag: openapi-sdk-v1.2.0 -> 1.2.0
+            VERSION="${GITHUB_REF#refs/tags/openapi-sdk-v}"
+          else
+            # Fall back to fallback_version from pyproject.toml
+            VERSION=$(python3 -c "
+          import tomllib, pathlib
+          p = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
+          print(p.get('tool', {}).get('setuptools_scm', {}).get('fallback_version', '0.0.0.dev0'))
+          ")
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Computed version: ${VERSION}"
+
   build-sdk:
+    needs: compute-version
     runs-on: ubuntu-latest
 
     steps:
@@ -60,14 +94,15 @@ jobs:
           echo "=== OpenAPI Generator version ==="
           openapi-generator-cli version
 
-          echo "=== SDK version from pyproject.toml ==="
-          make version
+          echo "=== SDK version ==="
+          echo "${{ needs.compute-version.outputs.version }}"
 
       - name: Generate OpenAPI SDK
         working-directory: client-sdks/openapi
         run: |
-          echo "Generating SDK with OPEN=1 (ogx_open_client)..."
-          make sdk OPEN=1
+          VERSION="${{ needs.compute-version.outputs.version }}"
+          echo "Generating SDK with OPEN=1 (ogx_open_client) at version ${VERSION}..."
+          make sdk OPEN=1 VERSION="${VERSION}"
 
       - name: Verify SDK generation
         working-directory: client-sdks/openapi
