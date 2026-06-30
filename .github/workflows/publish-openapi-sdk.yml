@@ -1,6 +1,6 @@
 name: Publish OpenAPI SDK to PyPI
 
-run-name: Publish ogx-open-client to PyPI
+run-name: Publish ogx-client to PyPI
 
 on:
   workflow_dispatch:
@@ -101,8 +101,8 @@ jobs:
         working-directory: client-sdks/openapi
         run: |
           VERSION="${{ needs.compute-version.outputs.version }}"
-          echo "Generating SDK with OPEN=1 (ogx_open_client) at version ${VERSION}..."
-          make sdk OPEN=1 VERSION="${VERSION}"
+          echo "Generating SDK with OPEN=0 (ogx_client) at version ${VERSION}..."
+          make sdk OPEN=0 VERSION="${VERSION}"
 
       - name: Verify SDK generation
         working-directory: client-sdks/openapi
@@ -169,10 +169,10 @@ jobs:
             echo ""
             echo "- **Event**: ${{ github.event_name }}"
             echo "- **Target**: TestPyPI"
-            echo "- **Package**: ogx-open-client"
+            echo "- **Package**: ogx-client"
             echo ""
             echo "✅ Package published to TestPyPI"
-            echo "Install with: \`pip install --index-url https://test.pypi.org/simple/ ogx-open-client\`"
+            echo "Install with: \`pip install --index-url https://test.pypi.org/simple/ ogx-client\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish-pypi:
@@ -204,8 +204,8 @@ jobs:
             echo ""
             echo "- **Event**: ${{ github.event_name }}"
             echo "- **Target**: PyPI (production)"
-            echo "- **Package**: ogx-open-client"
+            echo "- **Package**: ogx-client"
             echo ""
             echo "✅ Package published to PyPI"
-            echo "Install with: \`pip install ogx-open-client\`"
+            echo "Install with: \`pip install ogx-client\`"
           } >> "$GITHUB_STEP_SUMMARY"
