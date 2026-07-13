@@ -59,6 +59,7 @@ _CYPHER_OPS = {
     "lt": "<",
     "lte": "<=",
 }
+_FILTER_CANDIDATE_MULTIPLIER = 10
 
 
 def _sanitize_identifier(value: str) -> str:
@@ -140,6 +141,12 @@ def _translate_filters(filters: Filter | dict[str, Any] | None) -> tuple[str, di
         return joiner.join(clauses), params
 
     return translate(parsed)
+
+
+def _candidate_limit(k: int, filters: Filter | None) -> int:
+    if filters is None:
+        return k
+    return k * _FILTER_CANDIDATE_MULTIPLIER
 
 
 class Neo4jIndex(EmbeddingIndex):
@@ -238,17 +245,20 @@ class Neo4jIndex(EmbeddingIndex):
         self, embedding: NDArray, k: int, score_threshold: float, filters: Filter | None = None
     ) -> QueryChunksResponse:
         filter_clause, filter_params = _translate_filters(filters)
-        filter_sql = f" AND {filter_clause}" if filter_clause else ""
+        filter_cypher = f" AND {filter_clause}" if filter_clause else ""
+        candidate_limit = _candidate_limit(k, filters)
         async with self.driver.session(database=self.database) as session:
             result = await session.run(
                 f"""
-                CALL db.index.vector.queryNodes($index_name, $limit, $embedding)
+                CALL db.index.vector.queryNodes($index_name, $candidate_limit, $embedding)
                 YIELD node, score
-                WHERE score >= $score_threshold{filter_sql}
+                WHERE score >= $score_threshold{filter_cypher}
                 RETURN node.chunk_content AS chunk_content, score
                 ORDER BY score DESC
+                LIMIT $limit
                 """,
                 index_name=self.vector_index_name,
+                candidate_limit=candidate_limit,
                 limit=k,
                 embedding=embedding.tolist(),
                 score_threshold=score_threshold,
@@ -265,18 +275,21 @@ class Neo4jIndex(EmbeddingIndex):
         self, query_string: str, k: int, score_threshold: float, filters: Filter | None = None
     ) -> QueryChunksResponse:
         filter_clause, filter_params = _translate_filters(filters)
-        filter_sql = f" AND {filter_clause}" if filter_clause else ""
+        filter_cypher = f" AND {filter_clause}" if filter_clause else ""
+        candidate_limit = _candidate_limit(k, filters)
         async with self.driver.session(database=self.database) as session:
             result = await session.run(
                 f"""
-                CALL db.index.fulltext.queryNodes($index_name, $search_query, {{limit: $limit}})
+                CALL db.index.fulltext.queryNodes($index_name, $search_query, {{limit: $candidate_limit}})
                 YIELD node, score
-                WHERE score >= $score_threshold{filter_sql}
+                WHERE score >= $score_threshold{filter_cypher}
                 RETURN node.chunk_content AS chunk_content, score
                 ORDER BY score DESC
+                LIMIT $limit
                 """,
                 index_name=self.fulltext_index_name,
                 search_query=query_string,
+                candidate_limit=candidate_limit,
                 limit=k,
                 score_threshold=score_threshold,
                 **filter_params,
@@ -372,8 +385,8 @@ class Neo4jIndex(EmbeddingIndex):
                 f"""
                 MATCH (seed:{_quote_identifier(self.chunk_label)})
                 WHERE seed.chunk_id IN $seed_ids
-                MATCH path = (seed){rel_pattern}(neighbor:{_quote_identifier(self.chunk_label)})
-                WHERE neighbor.chunk_id <> seed.chunk_id
+                MATCH (seed){rel_pattern}(neighbor:{_quote_identifier(self.chunk_label)})
+                WHERE NOT neighbor.chunk_id IN $seed_ids
                 RETURN neighbor.chunk_id AS chunk_id,
                        neighbor.chunk_content AS chunk_content,
                        collect(DISTINCT seed.chunk_id) AS seed_ids
@@ -393,7 +406,7 @@ class Neo4jIndex(EmbeddingIndex):
     def _relationship_pattern(self, depth: int, relationship_types: list[str] | None) -> str:
         safe_depth = max(1, min(depth, 3))
         if relationship_types:
-            rel_types = "|".join(_quote_identifier(rel_type).strip("`") for rel_type in relationship_types)
+            rel_types = "|".join(_quote_identifier(rel_type) for rel_type in relationship_types)
             return f"-[:{rel_types}*1..{safe_depth}]-"
         return f"-[*1..{safe_depth}]-"
 

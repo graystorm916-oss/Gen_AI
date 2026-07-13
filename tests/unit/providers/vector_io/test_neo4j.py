@@ -6,6 +6,7 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 
 from ogx.core.storage.datatypes import KVStoreReference
@@ -152,3 +153,48 @@ async def test_neo4j_graph_expansion_merges_related_chunks() -> None:
 
     assert [chunk.chunk_id for chunk in expanded.chunks] == ["chunk-python", "chunk-ml"]
     assert expanded.scores == [0.9, pytest.approx(0.18)]
+
+
+def test_neo4j_relationship_pattern_quotes_relationship_types() -> None:
+    index = Neo4jIndex(AsyncMock(), _make_config(), _make_vector_store())
+
+    assert index._relationship_pattern(2, ["MENTIONS", "OWNS"]) == "-[:`MENTIONS`|`OWNS`*1..2]-"
+
+
+@pytest.mark.parametrize("query_method", ["query_vector", "query_keyword"])
+async def test_neo4j_filtered_queries_overfetch_candidates(query_method: str) -> None:
+    session = MagicMock()
+    result = AsyncMock()
+    result.data.return_value = []
+    session.run = AsyncMock(return_value=result)
+    driver = MagicMock()
+    driver.session.return_value.__aenter__ = AsyncMock(return_value=session)
+    driver.session.return_value.__aexit__ = AsyncMock(return_value=None)
+    index = Neo4jIndex(driver, _make_config(), _make_vector_store())
+    filters = ComparisonFilter(type="eq", key="topic", value="programming")
+
+    if query_method == "query_vector":
+        await index.query_vector(np.array([1.0, 0.0, 0.0]), 2, 0.0, filters)
+    else:
+        await index.query_keyword("programming", 2, 0.0, filters)
+
+    assert session.run.call_args.kwargs["candidate_limit"] > 2
+
+
+@pytest.mark.parametrize("query_method", ["query_vector", "query_keyword"])
+async def test_neo4j_unfiltered_queries_request_exact_k(query_method: str) -> None:
+    session = MagicMock()
+    result = AsyncMock()
+    result.data.return_value = []
+    session.run = AsyncMock(return_value=result)
+    driver = MagicMock()
+    driver.session.return_value.__aenter__ = AsyncMock(return_value=session)
+    driver.session.return_value.__aexit__ = AsyncMock(return_value=None)
+    index = Neo4jIndex(driver, _make_config(), _make_vector_store())
+
+    if query_method == "query_vector":
+        await index.query_vector(np.array([1.0, 0.0, 0.0]), 2, 0.0)
+    else:
+        await index.query_keyword("programming", 2, 0.0)
+
+    assert session.run.call_args.kwargs["candidate_limit"] == 2
