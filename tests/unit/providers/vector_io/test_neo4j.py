@@ -14,6 +14,8 @@ from ogx.providers.remote.vector_io.neo4j.config import Neo4jVectorIOConfig
 from ogx.providers.remote.vector_io.neo4j.neo4j import (
     Neo4jIndex,
     Neo4jVectorIOAdapter,
+    _metadata_properties,
+    _sanitize_identifier,
     _translate_filters,
 )
 from ogx_api import ChunkMetadata, EmbeddedChunk, QueryChunksResponse, VectorStore
@@ -77,6 +79,15 @@ def test_neo4j_config_accepts_persistence_reference() -> None:
     assert config.graph_relationship_types is None
 
 
+def test_neo4j_identifiers_are_collision_safe() -> None:
+    assert _sanitize_identifier("foo-bar") != _sanitize_identifier("foo_bar")
+
+
+def test_neo4j_metadata_rejects_nested_values() -> None:
+    with pytest.raises(ValueError, match="Failed to prepare Neo4j metadata"):
+        _metadata_properties({"nested": {"value": "unsupported"}})
+
+
 async def test_neo4j_adapter_initialize_creates_driver_and_loads_openai_stores() -> None:
     adapter = Neo4jVectorIOAdapter(_make_config(), inference_api=MagicMock(), files_api=None)
     mock_driver = AsyncMock()
@@ -106,6 +117,25 @@ async def test_neo4j_adapter_shutdown_closes_driver() -> None:
     assert adapter.driver is None
 
 
+async def test_neo4j_adapter_recreates_driver_after_connectivity_failure() -> None:
+    adapter = Neo4jVectorIOAdapter(_make_config(), inference_api=MagicMock(), files_api=None)
+    stale_driver = AsyncMock()
+    stale_driver.verify_connectivity.side_effect = RuntimeError("stale connection")
+    fresh_driver = AsyncMock()
+    adapter.driver = stale_driver
+
+    with patch(
+        "ogx.providers.remote.vector_io.neo4j.neo4j.AsyncGraphDatabase.driver", return_value=fresh_driver
+    ) as create_driver:
+        result = await adapter._ensure_driver()
+
+    assert result is fresh_driver
+    assert adapter.driver is fresh_driver
+    stale_driver.close.assert_awaited_once()
+    fresh_driver.verify_connectivity.assert_awaited_once()
+    create_driver.assert_called_once()
+
+
 def test_neo4j_translate_eq_filter() -> None:
     clause, params = _translate_filters(ComparisonFilter(type="eq", key="topic", value="programming"))
 
@@ -131,6 +161,13 @@ def test_neo4j_translate_compound_filter() -> None:
 def test_neo4j_translate_rejects_unsafe_metadata_key() -> None:
     with pytest.raises(ValueError, match="Failed to translate Neo4j metadata filter"):
         _translate_filters(ComparisonFilter(type="eq", key="topic.name", value="programming"))
+
+
+def test_neo4j_translate_rejects_unsupported_filter_type() -> None:
+    unsupported_filter = ComparisonFilter.model_construct(type="unsupported", key="topic", value="programming")
+
+    with pytest.raises(ValueError, match="Failed to translate Neo4j metadata filter"):
+        _translate_filters(unsupported_filter)
 
 
 async def test_neo4j_graph_expansion_merges_related_chunks() -> None:
@@ -159,6 +196,24 @@ def test_neo4j_relationship_pattern_quotes_relationship_types() -> None:
     index = Neo4jIndex(AsyncMock(), _make_config(), _make_vector_store())
 
     assert index._relationship_pattern(2, ["MENTIONS", "OWNS"]) == "-[:`MENTIONS`|`OWNS`*1..2]-"
+
+
+@pytest.mark.parametrize(
+    ("params", "message"),
+    [
+        ({"graph_max_neighbors": 0}, "graph_max_neighbors"),
+        ({"graph_max_neighbors": 1001}, "graph_max_neighbors"),
+        ({"graph_expansion_depth": 4}, "graph_expansion_depth"),
+        ({"graph_expansion_weight": 1.1}, "graph_expansion_weight"),
+        ({"graph_relationship_types": "MENTIONS"}, "graph_relationship_types"),
+    ],
+)
+async def test_neo4j_graph_expansion_validates_request_params(params: dict[str, object], message: str) -> None:
+    index = Neo4jIndex(AsyncMock(), _make_config(graph_retrieval_enabled=True), _make_vector_store())
+    response = QueryChunksResponse(chunks=[_make_chunk("chunk-python")], scores=[0.9])
+
+    with pytest.raises(ValueError, match=f"Failed to expand Neo4j graph: {message}"):
+        await index.expand_graph(response, k=2, params={"graph_retrieval_enabled": True, **params})
 
 
 @pytest.mark.parametrize("query_method", ["query_vector", "query_keyword"])

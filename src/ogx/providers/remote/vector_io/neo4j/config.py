@@ -34,6 +34,7 @@ class Neo4jVectorIOConfig(BaseModel):
     graph_max_neighbors: int = Field(
         default=10,
         ge=1,
+        le=1000,
         description="Maximum graph-expanded neighbor chunks to consider per query.",
     )
     graph_expansion_weight: float = Field(

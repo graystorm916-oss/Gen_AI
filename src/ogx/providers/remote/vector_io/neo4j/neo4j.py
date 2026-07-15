@@ -5,11 +5,12 @@
 # the root directory of this source tree.
 
 import asyncio
+import hashlib
 import heapq
 import json
 import re
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 from neo4j import AsyncDriver, AsyncGraphDatabase
 from numpy.typing import NDArray
@@ -60,13 +61,15 @@ _CYPHER_OPS = {
     "lte": "<=",
 }
 _FILTER_CANDIDATE_MULTIPLIER = 10
+_MAX_GRAPH_NEIGHBORS = 1000
 
 
 def _sanitize_identifier(value: str) -> str:
     sanitized = re.sub(r"[^A-Za-z0-9_]", "_", value)
     if not sanitized or sanitized[0].isdigit():
         sanitized = f"_{sanitized}"
-    return sanitized
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f"{sanitized}_{digest}"
 
 
 def _quote_identifier(value: str) -> str:
@@ -96,8 +99,11 @@ def _is_neo4j_property_value(value: Any) -> bool:
 def _metadata_properties(metadata: dict[str, Any]) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     for key, value in metadata.items():
-        if _VALID_METADATA_KEY.match(key) and _is_neo4j_property_value(value):
-            properties[_metadata_property(key)] = value
+        if not _VALID_METADATA_KEY.match(key):
+            raise ValueError(f"Failed to prepare Neo4j metadata: invalid metadata key {key!r}")
+        if not _is_neo4j_property_value(value):
+            raise ValueError(f"Failed to prepare Neo4j metadata: value for key {key!r} is not a Neo4j property value")
+        properties[_metadata_property(key)] = value
     return properties
 
 
@@ -128,7 +134,7 @@ def _translate_filters(filters: Filter | dict[str, Any] | None) -> tuple[str, di
                 return f"node.{_quote_property(property_name)} IN ${param_name}", {param_name: filter_obj.value}
             if filter_obj.type == "nin":
                 return f"NOT node.{_quote_property(property_name)} IN ${param_name}", {param_name: filter_obj.value}
-            raise NotImplementedError(f"Failed to translate Neo4j metadata filter: unsupported type {filter_obj.type}")
+            raise ValueError(f"Failed to translate Neo4j metadata filter: unsupported type {filter_obj.type}")
 
         joiner = " AND " if filter_obj.type == "and" else " OR "
         clauses = []
@@ -147,6 +153,34 @@ def _candidate_limit(k: int, filters: Filter | None) -> int:
     if filters is None:
         return k
     return k * _FILTER_CANDIDATE_MULTIPLIER
+
+
+def _validate_graph_int(name: str, value: Any, minimum: int, maximum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"Failed to expand Neo4j graph: {name} must be an integer")
+    if value < minimum or (maximum is not None and value > maximum):
+        bounds = f"between {minimum} and {maximum}" if maximum is not None else f"at least {minimum}"
+        raise ValueError(f"Failed to expand Neo4j graph: {name} must be {bounds}")
+    return cast(int, value)
+
+
+def _validate_graph_weight(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError("Failed to expand Neo4j graph: graph_expansion_weight must be a number")
+    weight = float(value)
+    if not 0.0 <= weight <= 1.0:
+        raise ValueError("Failed to expand Neo4j graph: graph_expansion_weight must be between 0 and 1")
+    return weight
+
+
+def _validate_relationship_types(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str) or not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError("Failed to expand Neo4j graph: graph_relationship_types must be a list of strings")
+    for relationship_type in value:
+        _quote_identifier(relationship_type)
+    return cast(list[str], value)
 
 
 class Neo4jIndex(EmbeddingIndex):
@@ -346,10 +380,22 @@ class Neo4jIndex(EmbeddingIndex):
             return response
 
         seed_ids = [chunk.chunk_id for chunk in response.chunks]
-        max_neighbors = int(params.get("graph_max_neighbors", self.config.graph_max_neighbors))
-        weight = float(params.get("graph_expansion_weight", self.config.graph_expansion_weight))
-        depth = int(params.get("graph_expansion_depth", self.config.graph_expansion_depth))
-        relationship_types = params.get("graph_relationship_types", self.config.graph_relationship_types)
+        max_neighbors = _validate_graph_int(
+            "graph_max_neighbors",
+            params.get("graph_max_neighbors", self.config.graph_max_neighbors),
+            1,
+            _MAX_GRAPH_NEIGHBORS,
+        )
+        weight = _validate_graph_weight(params.get("graph_expansion_weight", self.config.graph_expansion_weight))
+        depth = _validate_graph_int(
+            "graph_expansion_depth",
+            params.get("graph_expansion_depth", self.config.graph_expansion_depth),
+            1,
+            3,
+        )
+        relationship_types = _validate_relationship_types(
+            params.get("graph_relationship_types", self.config.graph_relationship_types)
+        )
 
         existing_scores = {
             chunk.chunk_id: score for chunk, score in zip(response.chunks, response.scores, strict=False)
@@ -405,8 +451,9 @@ class Neo4jIndex(EmbeddingIndex):
 
     def _relationship_pattern(self, depth: int, relationship_types: list[str] | None) -> str:
         safe_depth = max(1, min(depth, 3))
-        if relationship_types:
-            rel_types = "|".join(_quote_identifier(rel_type) for rel_type in relationship_types)
+        validated_relationship_types = _validate_relationship_types(relationship_types)
+        if validated_relationship_types:
+            rel_types = "|".join(_quote_identifier(rel_type) for rel_type in validated_relationship_types)
             return f"-[:{rel_types}*1..{safe_depth}]-"
         return f"-[*1..{safe_depth}]-"
 
@@ -444,17 +491,35 @@ class Neo4jVectorIOAdapter(OpenAIVectorStoreMixin, VectorIO, VectorStoresProtoco
     async def _ensure_driver(self) -> AsyncDriver:
         async with self._driver_lock:
             if self.driver is not None:
-                await self.driver.verify_connectivity()
-                return self.driver
+                existing_driver = self.driver
+                try:
+                    await existing_driver.verify_connectivity()
+                    return existing_driver
+                except Exception as error:
+                    logger.warning("Neo4j driver connectivity check failed; recreating driver", error=str(error))
+                    self.driver = None
+                    try:
+                        await existing_driver.close()
+                    except Exception:
+                        logger.exception("Failed to close stale Neo4j driver")
             auth = None
             if self.config.user:
                 auth = (
                     self.config.user,
                     self.config.password.get_secret_value() if self.config.password else "",
                 )
-            self.driver = AsyncGraphDatabase.driver(self.config.uri, auth=auth)
-            await self.driver.verify_connectivity()
-            return self.driver
+            new_driver = AsyncGraphDatabase.driver(self.config.uri, auth=auth)
+            self.driver = new_driver
+            try:
+                await new_driver.verify_connectivity()
+            except Exception:
+                self.driver = None
+                try:
+                    await new_driver.close()
+                except Exception:
+                    logger.exception("Failed to close Neo4j driver after connectivity failure")
+                raise
+            return new_driver
 
     async def initialize(self) -> None:
         logger.info("Initializing Neo4j vector_io adapter", uri=self.config.uri, database=self.config.database)
@@ -493,12 +558,12 @@ class Neo4jVectorIOAdapter(OpenAIVectorStoreMixin, VectorIO, VectorStoresProtoco
         if self.kvstore is None:
             raise RuntimeError("Failed to register Neo4j vector store: KVStore is not initialized")
         driver = await self._ensure_driver()
+        neo4j_index = Neo4jIndex(driver, self.config, vector_store)
+        await neo4j_index.initialize()
         await self.kvstore.set(
             key=f"{VECTOR_DBS_PREFIX}{vector_store.identifier}",
             value=vector_store.model_dump_json(),
         )
-        neo4j_index = Neo4jIndex(driver, self.config, vector_store)
-        await neo4j_index.initialize()
         self.cache[vector_store.identifier] = VectorStoreWithIndex(vector_store, neo4j_index, self.inference_api)
 
     async def unregister_vector_store(self, vector_store_id: str) -> None:
