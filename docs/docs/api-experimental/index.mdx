@@ -1,0 +1,68 @@
+---
+title: Experimental APIs
+description: APIs in development that may change
+sidebar_label: Experimental
+sidebar_position: 1
+---
+
+# Experimental APIs
+
+This section contains APIs that are still maturing and may change between releases. They are functional and available for use but have not yet reached stable (`v1`) status.
+
+:::warning
+Experimental APIs may introduce breaking changes in minor releases. Pin your client version if stability is important for your use case.
+:::
+
+## v1beta APIs
+
+These APIs are nearing stability but may still see minor changes.
+
+### Datasets API
+Manage datasets for evaluation workflows.
+
+**Endpoint prefix:** `v1beta`
+**Use case:** Dataset creation, listing, and deletion for eval pipelines.
+
+### DatasetIO API
+Read and write dataset contents.
+
+**Endpoint prefix:** `v1beta`
+**Use case:** Row-level access to dataset data for scoring and evaluation.
+
+### Connectors API
+Manage external connectors such as MCP servers.
+
+**Endpoint prefix:** `v1beta`
+**Use case:** Register and manage connections to external tool servers.
+
+## v1alpha APIs
+
+These APIs are in early development and more likely to change.
+
+### Eval API
+Run evaluation jobs against benchmarks.
+
+**Endpoint prefix:** `v1alpha`
+**Use case:** Execute evaluation pipelines and retrieve results.
+
+### Benchmarks API
+Register and manage benchmark suites.
+
+**Endpoint prefix:** `v1alpha`
+**Use case:** Define benchmark configurations for model evaluation.
+
+### File Processors API
+Parse and process uploaded files.
+
+**Endpoint prefix:** `v1alpha`
+**Use case:** Extract structured content from PDFs, DOCX, and other document formats.
+
+### Admin API
+Server administration and management.
+
+**Endpoint prefix:** `v1alpha`
+**Use case:** Server version information and administrative operations.
+
+## Feedback
+
+Report issues or suggest improvements through [GitHub Issues](https://github.com/ogx-ai/ogx/issues).
